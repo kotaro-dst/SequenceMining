@@ -1,5 +1,5 @@
 def spade_output(df, cv_data, id_data, url_data, support, maxlen, cv_pages):
-    !pip install pycspade
+    pip install pycspade
     import sys
     import pandas as pd
     from pycspade.helpers import spade, print_result
