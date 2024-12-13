@@ -1,1 +1,1 @@
-from SequenceMining.SequenceMining import *
+from SequenceMining import *
