@@ -1,4 +1,3 @@
-!pip install pycspade
 import sys
 import pandas as pd
 from pycspade.helpers import spade, print_result
