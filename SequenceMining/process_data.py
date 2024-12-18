@@ -1,220 +1,215 @@
-def spade_output(df, cv_data, id_data, url_data, support, maxlen, cv_pages):
-    pip install pycspade
-    import sys
-    import pandas as pd
-    from pycspade.helpers import spade, print_result
-    import io
-    import numpy as np
+from pyspark.sql import SparkSession
+import pandas as pd
+from IPython.display import display
+import numpy as np
+from IPython.display import Image, display
+import os
+from datetime import datetime
+import pytz
+import re
 
-    #dfからspadeの結果を出力
-    def get_raw_result(df,support,maxlen):
-        #spadeが回らないのでソートする
-        sorted_df2 = df.sort_values(by='cookie_index')
-        #使用データの形に整形
-        df_use = pd.DataFrame(sorted_df2, columns=["cookie_index","timestamp_index","url_index_x"])
-        #リスト形式への変換
-        data = df_use.apply(lambda row: [row['cookie_index'], row['timestamp_index'], [row['url_index_x']]], axis=1).tolist()
-        #spade結果の出力、存在割合、パターン長さが引数
-        result = spade(data=data, parse=True,support=support,maxlen=maxlen)
+# 特定のカラムを抽出
+def extract_columns(df_pandas, columns_to_extract):
+    return df_pandas[columns_to_extract]
 
-        return result
-    
-    result =  get_raw_result(df,support,maxlen)
+# 各セッションIDごとに最も早いタイムスタンプを持つ1行を取得
+def get_first_session_per_id(df_selected):
+    return df_selected.loc[df_selected.groupby([COOKIE_ID, SESSION_ID])[TIME_STAMP].idxmin()].drop_duplicates()
 
-    # pycspadeのprint_result関数の出力を文字列として取得するための関数
-    def get_print_result_string(result):
-        import sys
-        from contextlib import redirect_stdout
+# 新規フラグの設定
+def set_new_flag(distinct_df, new_visit_days=7):
+    distinct_df = distinct_df.sort_values(by=[COOKIE_ID, SESSION_ID, TIME_STAMP])
+    distinct_df[TIME_STAMP]=pd.to_datetime(distinct_df[TIME_STAMP])
+    distinct_df['prev_date'] = distinct_df.groupby(COOKIE_ID)[TIME_STAMP].shift(1)
+    distinct_df['days_diff'] = (distinct_df[TIME_STAMP] - distinct_df['prev_date']).dt.days
+    distinct_df['new_flag'] = 0
+    distinct_df.loc[distinct_df['prev_date'].isna() | (distinct_df['days_diff'] >= new_visit_days), 'new_flag'] = 1
+    return distinct_df
 
-        f = io.StringIO()
-        with redirect_stdout(f):
-            print_result(result)
-        return f.getvalue()
+# 新規フラグに基づいた新クッキーIDの割り振り
+def create_and_save_cookie_id_mapping(distinct_df):
+    distinct_df['cumulative_sum'] = distinct_df.groupby(COOKIE_ID)['new_flag'].cumsum()
+    distinct_df['new_cookie_id'] = distinct_df[COOKIE_ID] + '_' + distinct_df['cumulative_sum'].astype(str)
+    new_cookie_tmp = distinct_df[[COOKIE_ID, SESSION_ID, 'new_cookie_id']]
+    return new_cookie_tmp
 
-    result_string = get_print_result_string(result)
+# リピート回数の計算
+def calculate_repeat_count(distinct_df):
+    def count_repeats(group):
+        count = 0
+        repeat_counts = []
+        for flag in group['new_flag']:
+            if flag == 0:
+                repeat_counts.append(count)
+                count += 1
+            else:
+                repeat_counts.append(0)
+                count = 1
+        return repeat_counts
 
-    #result_stringをきれいなtableに変換
-    def get_result_table(result_string):
-        # 文字列を行ごとに分割
-        lines = result_string.strip().split('\n')
+    distinct_df['repeat_count'] = distinct_df.groupby('new_cookie_id').apply(lambda group: count_repeats(group)).explode().values
+    return distinct_df
 
-        # ヘッダー行をスキップ
-        data = []
-        for line in lines[1:]:
-            parts = line.split()
-            occurs = int(parts[0])
-            accum = int(parts[1])
-            support = float(parts[2])
-            confid = parts[3] if parts[3] != 'N/A' else None
-            lift = parts[4] if parts[4] != 'N/A' else None
-            sequence = ' '.join(parts[5:])
-            data.append([occurs, accum, support, confid, lift, sequence])
+# 累積訪問回数の計算
+def calculate_visit_count(distinct_df):
+    distinct_df['visit_cnt'] = distinct_df.sort_values(by=['new_cookie_id', TIME_STAMP]).groupby('new_cookie_id').cumcount() + 1
+    return distinct_df
 
-        # DataFrameに変換
-        df_result = pd.DataFrame(data, columns=['Occurs', 'Accum', 'Support', 'Confid', 'Lift', 'Sequence'])
+# データの結合
+def merge_data(df_selected, distinct_df):
+    return pd.merge(df_selected, distinct_df[['new_cookie_id', SESSION_ID, 'new_flag', 'repeat_count', 'visit_cnt']], on=SESSION_ID, how='left')
 
-        #シーケンスの中身の形をデータの形に合わせる[33, 44]
-        def convert_sequence(seq):
-            # 矢印で区切られた部分をリストに変換
-            return [int(item.strip('()')) for item in seq.split('->')]
-        
-        df_result['Sequence'] = df_result['Sequence'].apply(convert_sequence)
+# 各url_pageの出現回数と出現率を計算
+def calculate_url_page_ratios(df_selected):
+    url_page_counts = df_selected[URL].value_counts()
+    total_records = len(df_selected)
+    url_page_ratios = ((url_page_counts / total_records) * 100).round(2)
+    df_ratios = url_page_ratios.reset_index()
+    df_ratios.columns = [URL, 'appearance_rate']
+    return df_ratios
 
-        return df_result
-    
-    df_result = get_result_table(result_string)
+# 出現率のカラムを追加
+def add_appearance_rate(df_unique, df_ratios):
+    df_unique = df_unique.merge(df_ratios, on=URL, how='left')
+    df_unique['appearance_rate'].fillna(0, inplace=True)
+    df_unique['appearance_rate'] = df_unique['appearance_rate'].astype(float)
+    return df_unique
 
-    def get_cv_table(df_result):
-        #df_resultをcvページ含み、含まずに分類
-        # cvページが含まれるかどうかを判定する関数
-        def contains_cv_page(seq):
-            return any(page in cv_pages for page in seq)
+# url_pageのユニークな数を取得
+def get_unique_url_page_count(df_selected):
+    return df_selected[URL].nunique()
 
-        # cvページが含まれる列をフィルタリング
-        df_cv = df_result[df_result['Sequence'].apply(contains_cv_page)]
-        # cvページが含まれない列をフィルタリング
-        df_not_cv = df_result[~df_result['Sequence'].apply(contains_cv_page)]
+# 絞り込み方法を選択し、url_pageの一覧を取得、インデックスを付与
+def select_and_process_data(filter_option, df_top_percentage, df_filtered_by_rate, df_filtered_by_cumsum):
+    if filter_option == 1:
+        df_selected2 = df_top_percentage
+    elif filter_option == 2:
+        df_selected2 = df_filtered_by_rate
+    elif filter_option == 3:
+        df_selected2 = df_filtered_by_cumsum
+    else:
+        df_selected2 = pd.DataFrame()
 
-        return df_cv, df_not_cv
-    
-    df_cv, df_not_cv = get_cv_table(df_result)
+    df_selected2 = df_selected2.reset_index(drop=True)
+    df_selected2['index'] = df_selected2.index
 
-    #長さ2以上、Top50の抽出関数
-    def get_seq_len2_top50(df_result):
-        # Sequenceの要素数が2以上のレコードをフィルタリング
-        filtered_df = df_result[df_result['Sequence'].apply(len) >= 2]
-        # Occursの発生回数が多い順にソート
-        sorted_df = filtered_df.sort_values(by='Occurs', ascending=False)
-        # 上位100のレコードを取得
-        top_50_df = sorted_df.head(50)
-        # Sequenceのデータ
-        sequences = top_50_df['Sequence'].tolist()
-        return sequences
-    
-    sequences = get_seq_len2_top50(df_cv)
-    sequences1 = get_seq_len2_top50(df_not_cv)
+    if URL in df_selected2.columns:
+        return df_selected2[URL].unique().tolist()
+    else:
+        print(f"{URL}列が存在しません。")
+        return []
 
-    def get_user_pattern_table(df, sequences):
-        # 各Sequenceに対してカラムを追加し、0で初期化
-        for seq in sequences:
-            seq_str = ','.join(map(str, seq))
-            df[seq_str] = 0
-        # 各cookie_indexごとに処理
-        results = []
+# url_pageの一覧を表示
+def display_url_page_list(filter_option, df_top_percentage, df_filtered_by_rate, df_filtered_by_cumsum):
+    url_page_list = select_and_process_data(filter_option, df_top_percentage, df_filtered_by_rate, df_filtered_by_cumsum)
+    print("\n抽出したURL一覧:")
+    for index, value in enumerate(url_page_list):
+        print(f"{index}: {value}")
+    return url_page_list
 
-        for cid, group in df.groupby('cookie_index'):
-            # timestamp_indexの昇順に並べ替え
-            group = group.sort_values(by='timestamp_index', ascending=True)
-            act_nums = group['url_index_x'].tolist()
-            result = {"cookie_index": cid}
-            for seq in sequences:
-                seq_str = ','.join(map(str, seq))
-                seq_len = len(seq)
-                found = 0
-                seq_idx = 0
-                for act in act_nums:
-                    if act == seq[seq_idx]:
-                        seq_idx += 1
-                        if seq_idx == seq_len:
-                            found = 1
-                            break
-                result[seq_str] = found
-            results.append(result)
+# 使用するurl_pageの分析
+def analyze_url_page(df_unique, df_ratios, percentage, threshold, threshold_percentage, filter_option):
+    df_unique_sorted = df_unique.sort_values(by='appearance_rate', ascending=False)
+    top_percentage_count = int(len(df_unique_sorted) * percentage)
+    df_top_percentage = df_unique_sorted.head(top_percentage_count)
+    df_filtered_by_rate = df_unique_sorted[df_unique_sorted['appearance_rate'] >= threshold]
+    df_unique_sorted['cumulative_ratio'] = df_unique_sorted['appearance_rate'].cumsum()
+    df_filtered_by_cumsum = df_unique_sorted[df_unique_sorted['cumulative_ratio'] <= threshold_percentage]
 
-        # 結果のデータフレームを作成
-        result_df = pd.DataFrame(results)
-        return result_df
+    print(f"全URLの数: {df_unique[URL].nunique()}")
+    print(f"\n各絞り込み後URL数\n①上位{percentage * 100}%のユニークなURL数: {df_top_percentage[URL].nunique()}")
+    print(f"②登場率が{threshold}%以上のURL数: {df_filtered_by_rate[URL].nunique()}")
+    print(f"③累積構成比が{threshold_percentage}%を超えるまでのURL数: {df_filtered_by_cumsum.shape[0]}")
 
-    result_df = get_user_pattern_table(df, sequences)
-    result_df1 = get_user_pattern_table(df, sequences1)
+    return display_url_page_list(filter_option, df_top_percentage, df_filtered_by_rate, df_filtered_by_cumsum)
 
-    def join_result_cv(result_df, cv_data, id_data):
-        result_df['cookie_index'] = result_df['cookie_index'].astype(str)
-        id_data['cookie_index'] = id_data['cookie_index'].astype(str)
+# カラム名を設定する関数
+def set_column_names(columns):
+    global COOKIE_ID, SESSION_ID, TIME_STAMP, URL, DEFAULT_CV_FLG
+    COOKIE_ID = columns["cookie_id"]
+    SESSION_ID = columns["session_id"]
+    TIME_STAMP = columns["time_stamp"]
+    URL = columns["url"]
+    DEFAULT_CV_FLG = columns["default_cv_flg"]
 
-        # cv_dataとid_dataを結合する
-        cv_data_join = pd.merge(cv_data, id_data, on='cookie_id', how='left')
-        #ソートする(昇順の最後を採用、そのidがどこかでcvしていたらcv判定される)
-        cv_data_join2 = cv_data_join.sort_values('default_cv_flg').drop_duplicates(['cookie_index'], keep='last')
+# メイン関数
+def main_option(df_pandas, new_visit_days, filter_option, percentage, threshold, threshold_percentage, columns):
+    global df_selected, url_page_list
+    set_column_names(columns)
+    columns_to_extract = [COOKIE_ID, SESSION_ID, URL, TIME_STAMP, DEFAULT_CV_FLG]
+    df_selected = extract_columns(df_pandas, columns_to_extract)
+    distinct_df = get_first_session_per_id(df_selected)
+    distinct_df = set_new_flag(distinct_df, new_visit_days)
+    result_df = create_and_save_cookie_id_mapping(distinct_df)
+    distinct_df = calculate_repeat_count(distinct_df)
+    distinct_df = calculate_visit_count(distinct_df)
+    df_selected = merge_data(df_selected, distinct_df)
+    df_ratios = calculate_url_page_ratios(df_selected)
+    columns_to_extract_unique = [URL]
+    df_unique = df_selected[columns_to_extract_unique].drop_duplicates(subset=[URL])
+    df_unique = add_appearance_rate(df_unique, df_ratios)
+    unique_url_page_count = get_unique_url_page_count(df_selected)
+    url_page_list = analyze_url_page(df_unique, df_ratios, percentage, threshold, threshold_percentage, filter_option)
+    return df_selected, url_page_list
 
-        # result_dfにcv_data_joinのcookie_idとdefault_cv_flgを結合する
-        result_df_join = pd.merge(result_df, cv_data_join2[['cookie_index', 'default_cv_flg']], on='cookie_index',how='left')
-        
-        return result_df_join
-    
-    result_df_join_pd = join_result_cv(result_df, cv_data, id_data)
-    result_df_join_pd1 = join_result_cv(result_df1, cv_data, id_data)
 
-    def get_corr_ratio_table(result_df_join_pd):
-        ##相関の結果
-        correlation_matrix = result_df_join_pd.corr()
-        correlation_with_cv = pd.DataFrame({
-            'index': correlation_matrix.index,
-            'correlation_with_default_cv_flg': correlation_matrix['default_cv_flg']
-        }).reset_index(drop=True)
-        # cookie_indexの行とdefault_cv_flgの行を削除
-        correlation_with_cv = correlation_with_cv[
-            (correlation_with_cv['index'] != 'cookie_index') & 
-            (correlation_with_cv['index'] != 'default_cv_flg')
-        ]
+def process_and_save_data(df_selected, url_page_list, cv_url_page_index, columns):
+    # CVとするURLを一つ選択し、URLの左の数字を[]の中に記載
+    cv_url_page = url_page_list[cv_url_page_index]
 
-        ##CV率の計算
-        average_cv_flg = []
-        columns_list = []
-        # 各列についてフラグが立っている行のdefault_cv_flgの平均を計算
-        for column in result_df_join_pd.columns:
-            if column not in ['cookie_index', 'default_cv_flg']:
-                # フラグが立っている行を抽出
-                flagged_rows = result_df_join_pd[result_df_join_pd[column] == 1]
-                # default_cv_flgの平均を計算
-                mean_cv_flg = flagged_rows['default_cv_flg'].mean()
-                # 結果を格納
-                average_cv_flg.append(mean_cv_flg)
-                columns_list.append(column)
-        # 結果を新しいデータフレームに格納
-        average_cv_flg_df = pd.DataFrame({
-            'column': columns_list,
-            'average_cv_flg': average_cv_flg
-        })
+    # 元データからurl_pageを絞り込む
+    df_selected_filtered = df_selected[df_selected[columns['url']].isin(url_page_list)].copy()
 
-        # データフレームの結合
-        merged_df = pd.merge(correlation_with_cv, average_cv_flg_df, left_on='index', right_on='column', how='inner').drop(columns=['column'])
+    # url_pageに対応する先ほど抽出したpost_indexを取得
+    post_index_dict = pd.DataFrame(url_page_list, columns=[columns['url']]).reset_index().set_index(columns['url'])['index'].to_dict()
 
-        return merged_df
-    
-    #support情報の追加、result_df/result_df1を参照して作成
-    def join_support(result_df,merged_df):
-        #result_dfからcookie_indexをのぞいた各列について、合計/列数を行う
-        #Drop 'cookie_index' column
-        result_df_drop_index = result_df.drop(columns=['cookie_index'])
-        #Calculate sum and count for each column
-        sum_series = result_df_drop_index.sum()
-        count_series = result_df_drop_index.count()
-        #Create a new DataFrame with the results
-        summary_df = pd.DataFrame({
-            'index': sum_series.index,
-            'appearance rate': sum_series.values / count_series.values
-        })
+    # cv_flgとpost_indexを追加
+    df_selected_filtered.loc[:, 'cv_flg'] = df_selected_filtered[columns['url']].apply(lambda x: 1 if x == cv_url_page else 0)
+    df_selected_filtered.loc[:, 'url_index'] = df_selected_filtered[columns['url']].map(post_index_dict)
 
-        #テーブルデータをmerged_dfに結合する
-        merged_df3 = pd.merge(merged_df, summary_df, on='index', how='left')
+    # 以下、process_data関数の処理を実行
+    # URLとpost_indexのユニークな組み合わせを抽出
+    unique_combinations = df_selected_filtered[[URL, 'url_index']].drop_duplicates()
 
-        return merged_df3
+    # post_indexの昇順にソート
+    unique_combinations_sorted = unique_combinations.sort_values(by='url_index')
 
-    # URLカラムの作成
-    def join_url(url_data,merged_df):
-        # URLリストの辞書を作成
-        url_dict = dict(zip(url_data['url_index'].astype(str), url_data['url_3']))
-        merged_df['url_index'] = merged_df['index'].apply(lambda x: ','.join([url_dict[i] for i in x.split(',')]))
-        return merged_df
+    # ユニークなCOOKIE_IDにインデックスを付ける
+    unique_visid = df_selected_filtered[COOKIE_ID].unique()
+    visid_to_index = {visid: idx for idx, visid in enumerate(unique_visid)}
 
-    merged_df = get_corr_ratio_table(result_df_join_pd)
-    merged_df1 = get_corr_ratio_table(result_df_join_pd1)
+    # visid_to_indexをデータフレームに変換
+    visid_index_df = pd.DataFrame(list(visid_to_index.items()), columns=[COOKIE_ID, 'cookie_index'])
 
-    merged_df = join_support(result_df,merged_df)
-    merged_df1 = join_support(result_df1,merged_df1)
+    # ユニークなSESSION_IDにインデックスを付ける
+    unique_session = df_selected_filtered[SESSION_ID].unique()
+    session_to_index = {session: idx for idx, session in enumerate(unique_session)}
 
-    merged_df = join_url(url_data,merged_df)
-    merged_df1 = join_url(url_data,merged_df1)
+    # session_to_indexをデータフレームに変換
+    session_to_index_df = pd.DataFrame(list(session_to_index.items()), columns=[SESSION_ID, 'session_index'])
 
-    return merged_df, merged_df1
+    # 必要なカラムの抽出
+    df_visits = df_selected_filtered[[COOKIE_ID, SESSION_ID, TIME_STAMP, URL, 'url_index']]
+    df_url_groups = unique_combinations_sorted[[URL, 'url_index']]
+    df_cookieid = visid_index_df[[COOKIE_ID, 'cookie_index']]
+    df_session = session_to_index_df[[SESSION_ID, 'session_index']]
+
+    # URLとURLグループの対応表をマージ
+    #df_merged = pd.merge(df_visits, df_url_groups, on=URL, how='left')
+
+    # クッキーIDと対応表をマージ
+    df_merged = pd.merge(df_visits, df_cookieid, on=COOKIE_ID, how='left')
+
+    # セッションIDと対応表をマージ
+    df_merged = pd.merge(df_merged, df_session, on=SESSION_ID, how='left')
+
+    # クッキーIDごとにセッションIDをタイムスタンプ順に並べる
+    df_result = df_merged.sort_values(by=[COOKIE_ID, TIME_STAMP])
+
+    # クッキーIDごとにタイムスタンプの早い順にインデックスを付ける
+    df_result['timestamp_index'] = df_result.groupby('cookie_index').cumcount() + 1
+
+    # 必要なカラムの抽出
+    df_final = df_result[['cookie_index', 'session_index', 'timestamp_index', 'url_index']]
+
+    return unique_combinations_sorted, visid_index_df, session_to_index_df, df_final
