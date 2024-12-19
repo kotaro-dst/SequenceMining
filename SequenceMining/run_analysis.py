@@ -137,7 +137,7 @@ def join_result_cv(result_df, cv_data, id_data):
     id_data['cookie_index'] = id_data['cookie_index'].astype(str)
 
     # cv_dataとid_dataを結合する
-    cv_data_join = pd.merge(cv_data, id_data, on='cookie_id', how='left')
+    cv_data_join = pd.merge(cv_data, id_data, on=COOKIE_ID, how='left')
     #ソートする(昇順の最後を採用、そのidがどこかでcvしていたらcv判定される)
     cv_data_join2 = cv_data_join.sort_values(DEFAULT_CV_FLG).drop_duplicates(['cookie_index'], keep='last')
 
