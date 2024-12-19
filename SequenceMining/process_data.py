@@ -152,7 +152,6 @@ def main_option(df_pandas, new_visit_days, filter_option, percentage, threshold,
     url_page_list = analyze_url_page(df_unique, df_ratios, percentage, threshold, threshold_percentage, filter_option)
     return df_selected, url_page_list
 
-
 def process_and_save_data(df_selected, url_page_list, cv_url_page_index, columns):
     # CVとするURLを一つ選択し、URLの左の数字を[]の中に記載
     cv_url_page = url_page_list[cv_url_page_index]
@@ -166,6 +165,7 @@ def process_and_save_data(df_selected, url_page_list, cv_url_page_index, columns
     # cv_flgとpost_indexを追加
     df_selected_filtered.loc[:, 'cv_flg'] = df_selected_filtered[columns['url']].apply(lambda x: 1 if x == cv_url_page else 0)
     df_selected_filtered.loc[:, 'url_index'] = df_selected_filtered[columns['url']].map(post_index_dict)
+
 
     # 以下、process_data関数の処理を実行
     # URLとpost_indexのユニークな組み合わせを抽出
@@ -212,4 +212,4 @@ def process_and_save_data(df_selected, url_page_list, cv_url_page_index, columns
     # 必要なカラムの抽出
     df_final = df_result[['cookie_index', 'session_index', 'timestamp_index', 'url_index']]
 
-    return unique_combinations_sorted, visid_index_df, session_to_index_df, df_final
+    return unique_combinations_sorted, visid_index_df, session_to_index_df, df_final, df_selected_filtered

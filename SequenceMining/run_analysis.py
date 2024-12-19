@@ -4,6 +4,15 @@ from pycspade.helpers import spade, print_result
 import io
 import numpy as np
 
+#カラム名を設定
+def set_column_names(columns):
+    global COOKIE_ID, SESSION_ID, TIME_STAMP, URL, DEFAULT_CV_FLG
+    COOKIE_ID = columns["cookie_id"]
+    SESSION_ID = columns["session_id"]
+    TIME_STAMP = columns["time_stamp"]
+    URL = columns["url"]
+    DEFAULT_CV_FLG = columns["default_cv_flg"]
+
 
  #dfからspadeの結果を出力
 def get_raw_result(df,support,maxlen):
@@ -130,10 +139,10 @@ def join_result_cv(result_df, cv_data, id_data):
     # cv_dataとid_dataを結合する
     cv_data_join = pd.merge(cv_data, id_data, on='cookie_id', how='left')
     #ソートする(昇順の最後を採用、そのidがどこかでcvしていたらcv判定される)
-    cv_data_join2 = cv_data_join.sort_values('default_cv_flg').drop_duplicates(['cookie_index'], keep='last')
+    cv_data_join2 = cv_data_join.sort_values(DEFAULT_CV_FLG).drop_duplicates(['cookie_index'], keep='last')
 
     # result_dfにcv_data_joinのcookie_idとdefault_cv_flgを結合する
-    result_df_join = pd.merge(result_df, cv_data_join2[['cookie_index', 'default_cv_flg']], on='cookie_index',how='left')
+    result_df_join = pd.merge(result_df, cv_data_join2[['cookie_index', DEFAULT_CV_FLG]], on='cookie_index',how='left')
     
     return result_df_join
     
@@ -144,12 +153,12 @@ def get_corr_ratio_table(result_df_join_pd):
     correlation_matrix = result_df_join_pd.corr()
     correlation_with_cv = pd.DataFrame({
         'index': correlation_matrix.index,
-        'correlation_with_default_cv_flg': correlation_matrix['default_cv_flg']
+        'correlation_with_default_cv_flg': correlation_matrix[DEFAULT_CV_FLG]
     }).reset_index(drop=True)
     # cookie_indexの行とdefault_cv_flgの行を削除
     correlation_with_cv = correlation_with_cv[
         (correlation_with_cv['index'] != 'cookie_index') & 
-        (correlation_with_cv['index'] != 'default_cv_flg')
+        (correlation_with_cv['index'] != DEFAULT_CV_FLG)
     ]
 
     ##CV率の計算
@@ -157,11 +166,11 @@ def get_corr_ratio_table(result_df_join_pd):
     columns_list = []
     # 各列についてフラグが立っている行のdefault_cv_flgの平均を計算
     for column in result_df_join_pd.columns:
-        if column not in ['cookie_index', 'default_cv_flg']:
+        if column not in ['cookie_index',DEFAULT_CV_FLG]:
             # フラグが立っている行を抽出
             flagged_rows = result_df_join_pd[result_df_join_pd[column] == 1]
             # default_cv_flgの平均を計算
-            mean_cv_flg = flagged_rows['default_cv_flg'].mean()
+            mean_cv_flg = flagged_rows[DEFAULT_CV_FLG].mean()
             # 結果を格納
             average_cv_flg.append(mean_cv_flg)
             columns_list.append(column)
@@ -204,7 +213,9 @@ def join_url(url_data,merged_df):
 
 
 
-def spade_output(df, cv_data, id_data, url_data, support, maxlen, cv_pages):
+def spade_output(df, cv_data, id_data, url_data, support, maxlen, cv_pages, colums):
+    #カラム名の設定
+    set_column_names(columns)
     #pyspadeの結果の取得
     result =  get_raw_result(df,support,maxlen)
     #結果の整形
