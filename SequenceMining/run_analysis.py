@@ -72,7 +72,7 @@ def get_result_table(result_string):
     
     
 #df_resultをcvページ含み、含まずに分類
-def get_cv_table(df_result):
+def get_cv_table(df_result, cv_pages):
     # cvページが含まれるかどうかを判定する関数
     def contains_cv_page(seq):
         return any(page in cv_pages for page in seq)
@@ -223,7 +223,7 @@ def spade_output(df, cv_data, id_data, url_data, support, maxlen, cv_pages, colu
     df_result = get_result_table(result_string)
 
     #cv含みで分割
-    df_cv, df_not_cv = get_cv_table(df_result)
+    df_cv, df_not_cv = get_cv_table(df_result,cv_pages)
 
     #上位の結果に絞り込み
     sequences = get_seq_len2_top50(df_cv)
