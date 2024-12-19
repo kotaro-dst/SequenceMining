@@ -213,7 +213,7 @@ def join_url(url_data,merged_df):
 
 
 
-def spade_output(df, cv_data, id_data, url_data, support, maxlen, cv_pages, colums):
+def spade_output(df, cv_data, id_data, url_data, support, maxlen, cv_pages, columns):
     #カラム名の設定
     set_column_names(columns)
     #pyspadeの結果の取得
